@@ -57,9 +57,9 @@ flats_df = run_query("""
 """)
 
 # Extract wing from flat_code (first letter before space)
-flats_df["wing"] = flats_df["flat_code"].str.split(" ").str[0]
-
-wing_list = sorted(flats_df["wing"].unique())
+flats_df["wing"] = flats_df["flat_code"].astype(str).str.split(" ").str[0]
+flats_df = flats_df.dropna(subset=["wing"])
+wing_list = sorted([w for w in flats_df["wing"].unique() if w])
 selected_wing = st.sidebar.selectbox("Select Wing", ["All"] + wing_list)
 
 if selected_wing != "All":
