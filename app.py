@@ -37,6 +37,7 @@ def run_query(query, params=None):
     finally:
         conn.close()
 
+
 def format_balance(x):
     if x < 0:
         return f"{abs(x):,.2f} Dr"
@@ -45,26 +46,30 @@ def format_balance(x):
     else:
         return "0.00"
 
+
 st.title("🏢 Nirlon Society ERP Dashboard")
 
 # =====================================================
 # SIDEBAR FILTERS
 # =====================================================
+
 st.sidebar.header("Filters")
 
 from_date = st.sidebar.date_input("From Date", date(2025, 4, 1))
 to_date = st.sidebar.date_input("To Date", date.today())
 
 # =====================================================
-# FETCH DISTINCT FLATS (SAFE)
+# FETCH DISTINCT DEBTOR LEDGERS
 # =====================================================
+
 flats_query = """
     SELECT DISTINCT 
+        flat_ledger,
         flat_code,
         SPLIT_PART(flat_code, ' ', 1) AS wing
     FROM ledger_transactions
     WHERE flat_code IS NOT NULL
-    ORDER BY flat_code
+    ORDER BY flat_code, flat_ledger
 """
 
 flats_df = run_query(flats_query)
@@ -83,20 +88,22 @@ selected_wing = st.sidebar.selectbox(
 if selected_wing != "All":
     flats_df = flats_df[flats_df["wing"] == selected_wing]
 
-flat_list = flats_df["flat_code"].dropna().tolist()
+ledger_list = flats_df["flat_ledger"].dropna().tolist()
 
-selected_flat = st.sidebar.selectbox(
-    "Select Flat",
-    ["None"] + flat_list
+selected_ledger = st.sidebar.selectbox(
+    "Select Debtor Ledger",
+    ["None"] + ledger_list
 )
 
 # =====================================================
-# SUMMARY TABLE
+# SUMMARY TABLE (DEBTOR WISE)
 # =====================================================
-st.subheader("📊 Flat-wise Outstanding (Separate Funds)")
+
+st.subheader("📊 Debtor-wise Outstanding (Separate Funds)")
 
 summary_query = """
     SELECT 
+        flat_ledger,
         flat_code,
 
         SUM(CASE WHEN fund_type='maintenance' THEN amount ELSE 0 END) AS maintenance,
@@ -107,8 +114,8 @@ summary_query = """
     FROM ledger_transactions
     WHERE flat_code IS NOT NULL
     AND transaction_date BETWEEN %s AND %s
-    GROUP BY flat_code
-    ORDER BY flat_code
+    GROUP BY flat_ledger, flat_code
+    ORDER BY flat_code, flat_ledger
 """
 
 flat_balance_df = run_query(summary_query, (from_date, to_date))
@@ -120,14 +127,25 @@ if not flat_balance_df.empty:
     for col in ["maintenance", "maintenance_interest", "mrf", "mrf_interest"]:
         flat_balance_df[col] = flat_balance_df[col].apply(format_balance)
 
-    st.dataframe(flat_balance_df, use_container_width=True)
+    flat_balance_df = flat_balance_df.rename(columns={
+        "flat_ledger": "Debtor Ledger",
+        "flat_code": "Flat",
+        "maintenance": "Maintenance",
+        "maintenance_interest": "Maint. Interest",
+        "mrf": "MRF",
+        "mrf_interest": "MRF Interest"
+    })
+
+    st.dataframe(flat_balance_df, width="stretch")
+
 else:
     st.info("No data for selected date range.")
 
 # =====================================================
-# LEDGER STATEMENT
+# LEDGER STATEMENT (DEBTOR WISE)
 # =====================================================
-if selected_flat != "None":
+
+if selected_ledger != "None":
 
     st.subheader("📖 Ledger Statement")
 
@@ -157,7 +175,7 @@ if selected_flat != "None":
             voucher_no,
             amount
         FROM ledger_transactions
-        WHERE flat_code = %s
+        WHERE flat_ledger = %s
         AND fund_type = %s
         AND transaction_date BETWEEN %s AND %s
         ORDER BY transaction_date, id
@@ -165,12 +183,13 @@ if selected_flat != "None":
 
     ledger_df = run_query(
         ledger_query,
-        (selected_flat, fund_key, from_date, to_date)
+        (selected_ledger, fund_key, from_date, to_date)
     )
 
     if ledger_df.empty:
         st.info("No transactions found for selected period.")
     else:
+
         running_balance = 0
         rows = []
 
@@ -190,4 +209,5 @@ if selected_flat != "None":
             })
 
         final_df = pd.DataFrame(rows)
-        st.dataframe(final_df, use_container_width=True)
+
+        st.dataframe(final_df, width="stretch")
