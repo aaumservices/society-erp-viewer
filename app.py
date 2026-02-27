@@ -18,22 +18,24 @@ if not st.session_state.auth:
         st.stop()
 
 # =====================================================
-# DATABASE CONNECTION
+# DATABASE CONNECTION (SAFE - NO CACHING)
 # =====================================================
-@st.cache_resource
-def get_connection():
-    return psycopg2.connect(
+
+def run_query(query, params=None):
+    conn = psycopg2.connect(
         host=st.secrets["DB_HOST"],
         port=st.secrets["DB_PORT"],
         database=st.secrets["DB_NAME"],
         user=st.secrets["DB_USER"],
-        password=st.secrets["DB_PASSWORD"]
+        password=st.secrets["DB_PASSWORD"],
+        sslmode="require"
     )
 
-conn = get_connection()
-
-def run_query(query, params=None):
-    return pd.read_sql(query, conn, params=params)
+    try:
+        df = pd.read_sql(query, conn, params=params)
+        return df
+    finally:
+        conn.close()
 
 def format_balance(x):
     if x < 0:
@@ -43,7 +45,7 @@ def format_balance(x):
     else:
         return "0.00"
 
-st.title("🏢 Society ERP Dashboard")
+st.title("🏢 Nirlon Society ERP Dashboard")
 
 # =====================================================
 # SIDEBAR FILTERS
