@@ -41,80 +41,85 @@ st.sidebar.header("Filters")
 from_date = st.sidebar.date_input("From Date", date(2025, 4, 1))
 to_date = st.sidebar.date_input("To Date", date.today())
 
-# Wing list
+# Wing Filter
 wings = run_query("SELECT DISTINCT wing FROM flats ORDER BY wing;")
 wing_list = wings["wing"].tolist()
 selected_wing = st.sidebar.selectbox("Select Wing", ["All"] + wing_list)
 
-# Flat list (filtered by wing)
 if selected_wing == "All":
     flats_df = run_query("""
-        SELECT id, wing, flat_no, owner_name 
+        SELECT id, wing, flat_no, owner_name
         FROM flats
         ORDER BY wing, flat_no
     """)
 else:
     flats_df = run_query("""
-        SELECT id, wing, flat_no, owner_name 
+        SELECT id, wing, flat_no, owner_name
         FROM flats
         WHERE wing = %s
         ORDER BY flat_no
     """, (selected_wing,))
 
 flat_options = flats_df.apply(
-    lambda x: f"{x['wing']} {x['flat_no']} - {x['owner_name']}", axis=1
+    lambda x: f"{x['wing']} {x['flat_no']} - {x['owner_name']}",
+    axis=1
 ).tolist()
 
-selected_flat_display = st.sidebar.selectbox("Select Flat", ["None"] + flat_options)
+selected_flat_display = st.sidebar.selectbox(
+    "Select Flat",
+    ["None"] + flat_options
+)
 
 # =====================================================
-# KPIs
+# FLAT-WISE 4 FUND OUTSTANDING TABLE
 # =====================================================
-st.subheader("📊 Society Summary")
-
-total_raw = run_query("""
-    SELECT SUM(ve.amount)
-    FROM voucher_entries ve
-    JOIN vouchers v ON v.id = ve.voucher_id
-    WHERE v.voucher_date BETWEEN %s AND %s
-""", (from_date, to_date)).iloc[0, 0]
-
-col1, col2 = st.columns(2)
-
-if total_raw is not None:
-    if total_raw < 0:
-        col1.metric("Total Receivable", f"{abs(total_raw):,.2f} Dr")
-    else:
-        col1.metric("Total Advance Credit", f"{abs(total_raw):,.2f} Cr")
-
-# =====================================================
-# FLAT SUMMARY TABLE
-# =====================================================
-st.subheader("📋 Flat-wise Balance")
+st.subheader("📊 Flat-wise Outstanding (Separate Funds)")
 
 flat_balance_df = run_query("""
     SELECT 
-        f.wing,
-        f.flat_no,
         f.owner_name,
-        SUM(ve.amount) as raw_balance
+
+        SUM(CASE 
+            WHEN ve.ledger_name = f.owner_name 
+            THEN ve.amount ELSE 0 END) AS maintenance,
+
+        SUM(CASE 
+            WHEN ve.ledger_name LIKE f.owner_name || ' - Interest%%'
+            THEN ve.amount ELSE 0 END) AS maintenance_interest,
+
+        SUM(CASE 
+            WHEN ve.ledger_name LIKE f.owner_name || ' (Major Repair Fund)%%'
+            AND ve.ledger_name NOT LIKE '%%Int.%%'
+            THEN ve.amount ELSE 0 END) AS major_repair,
+
+        SUM(CASE 
+            WHEN ve.ledger_name LIKE f.owner_name || ' (Major Repair Fund - Int.%%'
+            THEN ve.amount ELSE 0 END) AS major_repair_interest
+
     FROM flats f
-    JOIN vouchers v ON v.flat_id = f.id
-    JOIN voucher_entries ve ON ve.voucher_id = v.id
+    LEFT JOIN vouchers v ON v.flat_id = f.id
+    LEFT JOIN voucher_entries ve ON ve.voucher_id = v.id
     WHERE v.voucher_date BETWEEN %s AND %s
-    GROUP BY f.wing, f.flat_no, f.owner_name
-    ORDER BY f.wing, f.flat_no
+    GROUP BY f.owner_name
+    ORDER BY f.owner_name
 """, (from_date, to_date))
 
 if not flat_balance_df.empty:
-    flat_balance_df["Amount"] = flat_balance_df["raw_balance"].abs().map("{:,.2f}".format)
-    flat_balance_df["Type"] = flat_balance_df["raw_balance"].apply(
-        lambda x: "Dr" if x < 0 else "Cr" if x > 0 else "Zero"
+
+    flat_balance_df = flat_balance_df.fillna(0)
+
+    st.dataframe(
+        flat_balance_df.rename(columns={
+            "owner_name": "Flat Owner",
+            "maintenance": "Maintenance",
+            "maintenance_interest": "Maint. Interest",
+            "major_repair": "Major Repair Fund",
+            "major_repair_interest": "MRF Interest"
+        })
     )
-    st.dataframe(flat_balance_df[["wing", "flat_no", "owner_name", "Amount", "Type"]])
 
 # =====================================================
-# LEDGER STATEMENT
+# LEDGER STATEMENT (SELECTED FLAT)
 # =====================================================
 if selected_flat_display != "None":
 
@@ -129,7 +134,30 @@ if selected_flat_display != "None":
     ].iloc[0]
 
     flat_id = int(selected_row["id"])
-    flat_name = selected_row["owner_name"]
+    owner_name = selected_row["owner_name"]
+
+    ledger_type = st.selectbox(
+        "Select Ledger Type",
+        [
+            "Maintenance",
+            "Maintenance Interest",
+            "Major Repair Fund",
+            "Major Repair Fund Interest"
+        ]
+    )
+
+    # Ledger Pattern Mapping
+    if ledger_type == "Maintenance":
+        pattern = owner_name
+
+    elif ledger_type == "Maintenance Interest":
+        pattern = owner_name + " - Interest%"
+
+    elif ledger_type == "Major Repair Fund":
+        pattern = owner_name + " (Major Repair Fund)%"
+
+    elif ledger_type == "Major Repair Fund Interest":
+        pattern = owner_name + " (Major Repair Fund - Int.%"
 
     ledger_df = run_query("""
         SELECT
@@ -142,43 +170,31 @@ if selected_flat_display != "None":
         JOIN voucher_entries ve ON ve.voucher_id = v.id
         WHERE v.flat_id = %s
         AND v.voucher_date BETWEEN %s AND %s
-        ORDER BY v.voucher_date, v.id, ve.id
-    """, (flat_id, from_date, to_date))
+        AND ve.ledger_name LIKE %s
+        ORDER BY v.voucher_date, v.id
+    """, (flat_id, from_date, to_date, pattern))
 
     if not ledger_df.empty:
 
-        running_flat = 0
-        running_full = 0
+        running_balance = 0
         rows = []
 
         for _, row in ledger_df.iterrows():
+
             amount = row["amount"]
-
-            if amount < 0:
-                debit = abs(amount)
-                credit = 0
-            else:
-                debit = 0
-                credit = amount
-
-            running_full += amount
-
-            if row["ledger_name"] == flat_name:
-                running_flat += amount
+            running_balance += amount
 
             rows.append({
                 "Date": row["voucher_date"],
-                "Type": row["voucher_type"],
+                "Voucher Type": row["voucher_type"],
                 "Voucher No": row["voucher_no"],
                 "Ledger": row["ledger_name"],
-                "Debit": debit,
-                "Credit": credit,
-                "Flat Balance": f"{abs(running_flat):,.2f} {'Dr' if running_flat < 0 else 'Cr' if running_flat > 0 else ''}",
-                "Full Voucher Balance": f"{abs(running_full):,.2f} {'Dr' if running_full < 0 else 'Cr' if running_full > 0 else ''}"
+                "Debit": abs(amount) if amount < 0 else 0,
+                "Credit": amount if amount > 0 else 0,
+                "Running Balance": running_balance
             })
 
         final_df = pd.DataFrame(rows)
-
         st.dataframe(final_df)
 
     else:
