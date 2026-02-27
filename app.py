@@ -31,9 +31,6 @@ conn = psycopg2.connect(
 def run_query(query, params=None):
     return pd.read_sql(query, conn, params=params)
 
-# =====================================================
-# HELPERS
-# =====================================================
 def format_balance(x):
     if x < 0:
         return f"{abs(x):,.2f} Dr"
@@ -42,9 +39,6 @@ def format_balance(x):
     else:
         return "0.00"
 
-# =====================================================
-# TITLE
-# =====================================================
 st.title("🏢 Society ERP Dashboard")
 
 # =====================================================
@@ -55,41 +49,29 @@ st.sidebar.header("Filters")
 from_date = st.sidebar.date_input("From Date", date(2025, 4, 1))
 to_date = st.sidebar.date_input("To Date", date.today())
 
-# Wing filter
-wings = run_query("SELECT DISTINCT wing FROM flats ORDER BY wing;")
-wing_list = wings["wing"].dropna().tolist()
+# Get all flat codes
+flats_df = run_query("""
+    SELECT DISTINCT flat_code
+    FROM ledger_transactions
+    ORDER BY flat_code
+""")
+
+# Extract wing from flat_code (first letter before space)
+flats_df["wing"] = flats_df["flat_code"].str.split(" ").str[0]
+
+wing_list = sorted(flats_df["wing"].unique())
 selected_wing = st.sidebar.selectbox("Select Wing", ["All"] + wing_list)
 
-# Fetch flats
-if selected_wing == "All":
-    flats_df = run_query("""
-        SELECT id, wing, flat_no, owner_name
-        FROM flats
-        ORDER BY wing, flat_no
-    """)
-else:
-    flats_df = run_query("""
-        SELECT id, wing, flat_no, owner_name
-        FROM flats
-        WHERE wing = %s
-        ORDER BY flat_no
-    """, (selected_wing,))
+if selected_wing != "All":
+    flats_df = flats_df[flats_df["wing"] == selected_wing]
 
-# Create flat_code column (Wing + Flat No)
-flats_df["flat_code"] = flats_df["wing"] + " " + flats_df["flat_no"].astype(str)
-
-flat_options = flats_df.apply(
-    lambda x: f"{x['flat_code']} - {x['owner_name']}",
-    axis=1
-).tolist()
-
-selected_flat_display = st.sidebar.selectbox(
+selected_flat = st.sidebar.selectbox(
     "Select Flat",
-    ["None"] + flat_options
+    ["None"] + flats_df["flat_code"].tolist()
 )
 
 # =====================================================
-# FLAT-WISE OUTSTANDING SUMMARY
+# SUMMARY TABLE
 # =====================================================
 st.subheader("📊 Flat-wise Outstanding (Separate Funds)")
 
@@ -114,36 +96,17 @@ if not flat_balance_df.empty:
 
     flat_balance_df = flat_balance_df.fillna(0)
 
-    # Apply Dr/Cr formatting
     for col in ["maintenance", "maintenance_interest", "mrf", "mrf_interest"]:
         flat_balance_df[col] = flat_balance_df[col].apply(format_balance)
 
-    st.dataframe(
-        flat_balance_df.rename(columns={
-            "flat_code": "Flat",
-            "maintenance": "Maintenance",
-            "maintenance_interest": "Maint. Interest",
-            "mrf": "Major Repair Fund",
-            "mrf_interest": "MRF Interest"
-        }),
-        use_container_width=True
-    )
+    st.dataframe(flat_balance_df, use_container_width=True)
 
 # =====================================================
 # LEDGER STATEMENT
 # =====================================================
-if selected_flat_display != "None":
+if selected_flat != "None":
 
     st.subheader("📖 Ledger Statement")
-
-    selected_row = flats_df[
-        flats_df.apply(
-            lambda x: f"{x['flat_code']} - {x['owner_name']}" == selected_flat_display,
-            axis=1
-        )
-    ].iloc[0]
-
-    selected_flat_code = selected_row["flat_code"]
 
     ledger_type = st.selectbox(
         "Select Ledger Type",
@@ -179,7 +142,7 @@ if selected_flat_display != "None":
 
     ledger_df = run_query(
         ledger_query,
-        (selected_flat_code, fund_key, from_date, to_date)
+        (selected_flat, fund_key, from_date, to_date)
     )
 
     if not ledger_df.empty:
@@ -203,7 +166,6 @@ if selected_flat_display != "None":
             })
 
         final_df = pd.DataFrame(rows)
-
         st.dataframe(final_df, use_container_width=True)
 
     else:
