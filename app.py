@@ -31,6 +31,20 @@ conn = psycopg2.connect(
 def run_query(query, params=None):
     return pd.read_sql(query, conn, params=params)
 
+# =====================================================
+# HELPERS
+# =====================================================
+def format_balance(x):
+    if x < 0:
+        return f"{abs(x):,.2f} Dr"
+    elif x > 0:
+        return f"{abs(x):,.2f} Cr"
+    else:
+        return "0.00"
+
+# =====================================================
+# TITLE
+# =====================================================
 st.title("🏢 Society ERP Dashboard")
 
 # =====================================================
@@ -41,11 +55,12 @@ st.sidebar.header("Filters")
 from_date = st.sidebar.date_input("From Date", date(2025, 4, 1))
 to_date = st.sidebar.date_input("To Date", date.today())
 
-# Wing Filter
+# Wing filter
 wings = run_query("SELECT DISTINCT wing FROM flats ORDER BY wing;")
-wing_list = wings["wing"].tolist()
+wing_list = wings["wing"].dropna().tolist()
 selected_wing = st.sidebar.selectbox("Select Wing", ["All"] + wing_list)
 
+# Fetch flats
 if selected_wing == "All":
     flats_df = run_query("""
         SELECT id, wing, flat_no, owner_name
@@ -60,8 +75,11 @@ else:
         ORDER BY flat_no
     """, (selected_wing,))
 
+# Create flat_code column (Wing + Flat No)
+flats_df["flat_code"] = flats_df["wing"] + " " + flats_df["flat_no"].astype(str)
+
 flat_options = flats_df.apply(
-    lambda x: f"{x['wing']} {x['flat_no']} - {x['owner_name']}",
+    lambda x: f"{x['flat_code']} - {x['owner_name']}",
     axis=1
 ).tolist()
 
@@ -71,55 +89,48 @@ selected_flat_display = st.sidebar.selectbox(
 )
 
 # =====================================================
-# FLAT-WISE 4 FUND OUTSTANDING TABLE
+# FLAT-WISE OUTSTANDING SUMMARY
 # =====================================================
 st.subheader("📊 Flat-wise Outstanding (Separate Funds)")
 
-flat_balance_df = run_query("""
+summary_query = """
     SELECT 
-        f.owner_name,
+        flat_code,
 
-        SUM(CASE 
-            WHEN ve.ledger_name = f.owner_name 
-            THEN ve.amount ELSE 0 END) AS maintenance,
+        SUM(CASE WHEN fund_type='maintenance' THEN amount ELSE 0 END) AS maintenance,
+        SUM(CASE WHEN fund_type='maintenance_interest' THEN amount ELSE 0 END) AS maintenance_interest,
+        SUM(CASE WHEN fund_type='mrf' THEN amount ELSE 0 END) AS mrf,
+        SUM(CASE WHEN fund_type='mrf_interest' THEN amount ELSE 0 END) AS mrf_interest
 
-        SUM(CASE 
-            WHEN ve.ledger_name LIKE f.owner_name || ' - Interest%%'
-            THEN ve.amount ELSE 0 END) AS maintenance_interest,
+    FROM ledger_transactions
+    WHERE voucher_date BETWEEN %s AND %s
+    GROUP BY flat_code
+    ORDER BY flat_code
+"""
 
-        SUM(CASE 
-            WHEN ve.ledger_name LIKE f.owner_name || ' (Major Repair Fund)%%'
-            AND ve.ledger_name NOT LIKE '%%Int.%%'
-            THEN ve.amount ELSE 0 END) AS major_repair,
-
-        SUM(CASE 
-            WHEN ve.ledger_name LIKE f.owner_name || ' (Major Repair Fund - Int.%%'
-            THEN ve.amount ELSE 0 END) AS major_repair_interest
-
-    FROM flats f
-    LEFT JOIN vouchers v ON v.flat_id = f.id
-    LEFT JOIN voucher_entries ve ON ve.voucher_id = v.id
-    WHERE v.voucher_date BETWEEN %s AND %s
-    GROUP BY f.owner_name
-    ORDER BY f.owner_name
-""", (from_date, to_date))
+flat_balance_df = run_query(summary_query, (from_date, to_date))
 
 if not flat_balance_df.empty:
 
     flat_balance_df = flat_balance_df.fillna(0)
 
+    # Apply Dr/Cr formatting
+    for col in ["maintenance", "maintenance_interest", "mrf", "mrf_interest"]:
+        flat_balance_df[col] = flat_balance_df[col].apply(format_balance)
+
     st.dataframe(
         flat_balance_df.rename(columns={
-            "owner_name": "Flat Owner",
+            "flat_code": "Flat",
             "maintenance": "Maintenance",
             "maintenance_interest": "Maint. Interest",
-            "major_repair": "Major Repair Fund",
-            "major_repair_interest": "MRF Interest"
-        })
+            "mrf": "Major Repair Fund",
+            "mrf_interest": "MRF Interest"
+        }),
+        use_container_width=True
     )
 
 # =====================================================
-# LEDGER STATEMENT (SELECTED FLAT)
+# LEDGER STATEMENT
 # =====================================================
 if selected_flat_display != "None":
 
@@ -127,14 +138,12 @@ if selected_flat_display != "None":
 
     selected_row = flats_df[
         flats_df.apply(
-            lambda x: f"{x['wing']} {x['flat_no']} - {x['owner_name']}" 
-            == selected_flat_display,
+            lambda x: f"{x['flat_code']} - {x['owner_name']}" == selected_flat_display,
             axis=1
         )
     ].iloc[0]
 
-    flat_id = int(selected_row["id"])
-    owner_name = selected_row["owner_name"]
+    selected_flat_code = selected_row["flat_code"]
 
     ledger_type = st.selectbox(
         "Select Ledger Type",
@@ -146,33 +155,32 @@ if selected_flat_display != "None":
         ]
     )
 
-    # Ledger Pattern Mapping
-    if ledger_type == "Maintenance":
-        pattern = owner_name
+    fund_map = {
+        "Maintenance": "maintenance",
+        "Maintenance Interest": "maintenance_interest",
+        "Major Repair Fund": "mrf",
+        "Major Repair Fund Interest": "mrf_interest"
+    }
 
-    elif ledger_type == "Maintenance Interest":
-        pattern = owner_name + " - Interest%"
+    fund_key = fund_map[ledger_type]
 
-    elif ledger_type == "Major Repair Fund":
-        pattern = owner_name + " (Major Repair Fund)%"
-
-    elif ledger_type == "Major Repair Fund Interest":
-        pattern = owner_name + " (Major Repair Fund - Int.%"
-
-    ledger_df = run_query("""
+    ledger_query = """
         SELECT
-            v.voucher_date,
-            v.voucher_type,
-            v.voucher_no,
-            ve.ledger_name,
-            ve.amount
-        FROM vouchers v
-        JOIN voucher_entries ve ON ve.voucher_id = v.id
-        WHERE v.flat_id = %s
-        AND v.voucher_date BETWEEN %s AND %s
-        AND ve.ledger_name LIKE %s
-        ORDER BY v.voucher_date, v.id
-    """, (flat_id, from_date, to_date, pattern))
+            voucher_date,
+            voucher_type,
+            voucher_no,
+            amount
+        FROM ledger_transactions
+        WHERE flat_code = %s
+        AND fund_type = %s
+        AND voucher_date BETWEEN %s AND %s
+        ORDER BY voucher_date, id
+    """
+
+    ledger_df = run_query(
+        ledger_query,
+        (selected_flat_code, fund_key, from_date, to_date)
+    )
 
     if not ledger_df.empty:
 
@@ -188,14 +196,15 @@ if selected_flat_display != "None":
                 "Date": row["voucher_date"],
                 "Voucher Type": row["voucher_type"],
                 "Voucher No": row["voucher_no"],
-                "Ledger": row["ledger_name"],
                 "Debit": abs(amount) if amount < 0 else 0,
                 "Credit": amount if amount > 0 else 0,
-                "Running Balance": running_balance
+                "Balance": f"{abs(running_balance):,.2f} "
+                           f"{'Dr' if running_balance < 0 else 'Cr' if running_balance > 0 else ''}"
             })
 
         final_df = pd.DataFrame(rows)
-        st.dataframe(final_df)
+
+        st.dataframe(final_df, use_container_width=True)
 
     else:
         st.info("No transactions found for selected period.")
