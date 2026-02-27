@@ -20,13 +20,17 @@ if not st.session_state.auth:
 # =====================================================
 # DATABASE CONNECTION
 # =====================================================
-conn = psycopg2.connect(
-    host=st.secrets["DB_HOST"],
-    port=st.secrets["DB_PORT"],
-    database=st.secrets["DB_NAME"],
-    user=st.secrets["DB_USER"],
-    password=st.secrets["DB_PASSWORD"]
-)
+@st.cache_resource
+def get_connection():
+    return psycopg2.connect(
+        host=st.secrets["DB_HOST"],
+        port=st.secrets["DB_PORT"],
+        database=st.secrets["DB_NAME"],
+        user=st.secrets["DB_USER"],
+        password=st.secrets["DB_PASSWORD"]
+    )
+
+conn = get_connection()
 
 def run_query(query, params=None):
     return pd.read_sql(query, conn, params=params)
@@ -49,25 +53,39 @@ st.sidebar.header("Filters")
 from_date = st.sidebar.date_input("From Date", date(2025, 4, 1))
 to_date = st.sidebar.date_input("To Date", date.today())
 
-# Get all flat codes
-flats_df = run_query("""
-    SELECT DISTINCT flat_code
+# =====================================================
+# FETCH DISTINCT FLATS (SAFE)
+# =====================================================
+flats_query = """
+    SELECT DISTINCT 
+        flat_code,
+        SPLIT_PART(flat_code, ' ', 1) AS wing
     FROM ledger_transactions
+    WHERE flat_code IS NOT NULL
     ORDER BY flat_code
-""")
+"""
 
-# Extract wing from flat_code (first letter before space)
-flats_df["wing"] = flats_df["flat_code"].astype(str).str.split(" ").str[0]
-flats_df = flats_df.dropna(subset=["wing"])
-wing_list = sorted([w for w in flats_df["wing"].unique() if w])
-selected_wing = st.sidebar.selectbox("Select Wing", ["All"] + wing_list)
+flats_df = run_query(flats_query)
+
+if flats_df.empty:
+    st.error("No flat data found in ledger_transactions table.")
+    st.stop()
+
+wing_list = sorted(flats_df["wing"].dropna().unique().tolist())
+
+selected_wing = st.sidebar.selectbox(
+    "Select Wing",
+    ["All"] + wing_list
+)
 
 if selected_wing != "All":
     flats_df = flats_df[flats_df["wing"] == selected_wing]
 
+flat_list = flats_df["flat_code"].dropna().tolist()
+
 selected_flat = st.sidebar.selectbox(
     "Select Flat",
-    ["None"] + flats_df["flat_code"].tolist()
+    ["None"] + flat_list
 )
 
 # =====================================================
@@ -85,7 +103,8 @@ summary_query = """
         SUM(CASE WHEN fund_type='mrf_interest' THEN amount ELSE 0 END) AS mrf_interest
 
     FROM ledger_transactions
-    WHERE voucher_date BETWEEN %s AND %s
+    WHERE flat_code IS NOT NULL
+    AND voucher_date BETWEEN %s AND %s
     GROUP BY flat_code
     ORDER BY flat_code
 """
@@ -100,6 +119,8 @@ if not flat_balance_df.empty:
         flat_balance_df[col] = flat_balance_df[col].apply(format_balance)
 
     st.dataframe(flat_balance_df, use_container_width=True)
+else:
+    st.info("No data for selected date range.")
 
 # =====================================================
 # LEDGER STATEMENT
@@ -145,8 +166,9 @@ if selected_flat != "None":
         (selected_flat, fund_key, from_date, to_date)
     )
 
-    if not ledger_df.empty:
-
+    if ledger_df.empty:
+        st.info("No transactions found for selected period.")
+    else:
         running_balance = 0
         rows = []
 
@@ -167,6 +189,3 @@ if selected_flat != "None":
 
         final_df = pd.DataFrame(rows)
         st.dataframe(final_df, use_container_width=True)
-
-    else:
-        st.info("No transactions found for selected period.")
