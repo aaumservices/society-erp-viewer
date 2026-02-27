@@ -128,7 +128,7 @@ if selected_flat_display != "None":
         )
     ].iloc[0]
 
-    flat_id = selected_row["id"]
+    flat_id = int(selected_row["id"])
     flat_name = selected_row["owner_name"]
 
     ledger_df = run_query("""
