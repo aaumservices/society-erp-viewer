@@ -104,7 +104,7 @@ summary_query = """
 
     FROM ledger_transactions
     WHERE flat_code IS NOT NULL
-    AND voucher_date BETWEEN %s AND %s
+    AND transaction_date BETWEEN %s AND %s
     GROUP BY flat_code
     ORDER BY flat_code
 """
@@ -150,15 +150,15 @@ if selected_flat != "None":
 
     ledger_query = """
         SELECT
-            voucher_date,
+            transaction_date,
             voucher_type,
             voucher_no,
             amount
         FROM ledger_transactions
         WHERE flat_code = %s
         AND fund_type = %s
-        AND voucher_date BETWEEN %s AND %s
-        ORDER BY voucher_date, id
+        AND transaction_date BETWEEN %s AND %s
+        ORDER BY transaction_date, id
     """
 
     ledger_df = run_query(
@@ -178,7 +178,7 @@ if selected_flat != "None":
             running_balance += amount
 
             rows.append({
-                "Date": row["voucher_date"],
+                "Date": row["transaction_date"],
                 "Voucher Type": row["voucher_type"],
                 "Voucher No": row["voucher_no"],
                 "Debit": abs(amount) if amount < 0 else 0,
